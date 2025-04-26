@@ -8,7 +8,7 @@ if (-Not (Test-Path $firefoxPath)) {
 }
 
 # Define default URL
-$defaultUrl = "www.google.com"
+$defaultUrl = "https://glastonbury.seetickets.com/"
 
 # Define icon and color options
 $colors = @("blue", "turquoise", "green", "yellow", "orange", "red", "pink", "purple")
