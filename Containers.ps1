@@ -74,12 +74,6 @@ if (-Not (Test-Path $extensionsJsonPath)) {
 
 $extensionsData = Get-Content $extensionsJsonPath -Raw | ConvertFrom-Json
 
-# DEBUG: List all installed extensions and their status
-Write-Host "Installed extensions:"
-foreach ($addon in $extensionsData.addons) {
-    Write-Host "- Name: $($addon.defaultLocale.name), Active: $($addon.active)"
-}
-
 $targetExtensionName = "Open external links in a container"
 $extensionFound = $extensionsData.addons | Where-Object {
     $_.defaultLocale.name -eq $targetExtensionName -and $_.active -eq $true
