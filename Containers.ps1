@@ -63,8 +63,30 @@ $profileFolder = if ($selectedProfile.IsRelative -eq 1) {
     $selectedProfile.Path
 }
 
-Write-Host "Using Firefox profile at: $profileFolder"
 
+# Check if the required Firefox extension is active
+$extensionsJsonPath = Join-Path $profileFolder "extensions.json"
+
+if (-Not (Test-Path $extensionsJsonPath)) {
+    Write-Host "Could not find extensions.json at $extensionsJsonPath"
+    exit
+}
+
+$extensionsData = Get-Content $extensionsJsonPath -Raw | ConvertFrom-Json
+
+$targetExtensionName = "Open external links in a container"
+$extensionFound = $extensionsData.addons | Where-Object {
+    $_.defaultLocale.name -eq $targetExtensionName -and $_.active -eq $true
+}
+
+if (-not $extensionFound) {
+    Write-Host ""
+    Write-Host "The required extension '$targetExtensionName' is not active or not installed."
+    Write-Host "Please install it from: https://addons.mozilla.org/en-GB/firefox/addon/open-url-in-container/"
+    exit
+}
+
+Write-Host "Extension '$targetExtensionName' is active. Proceeding..."
 
 $containersJsonPath = Join-Path $profileFolder "containers.json"
 
@@ -178,7 +200,6 @@ for ($i = 0; $i -lt $containersToOpen; $i++) {
 }
 
 Write-Host "Opened $inputUrl in $containersToOpen containers."
-
 
 
 
