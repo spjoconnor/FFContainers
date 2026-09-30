@@ -5,17 +5,9 @@
     $ErrorActionPreference = 'Stop'
     $lockStream = $null
 
-    function Ask-Yes([string]$Prompt) {
-        while ($true) {
-            $answer = (Read-Host "$Prompt [y/N]").Trim()
-            if ($answer -match '^(y|yes)$') { return $true }
-            if ($answer -match '^(n|no)?$') { return $false }
-            Write-Host 'Please enter y or n.'
-        }
-    }
     function Ask-Number([string]$Prompt, [int]$Min, [int]$Max, [int]$Default) {
         while ($true) {
-            $answer = (Read-Host "$Prompt [$Default, range $Min-$Max]").Trim()
+            $answer = (Read-Host "$Prompt [Enter = $Default]").Trim()
             if ($answer -eq '') { return $Default }
             $number = 0
             if ([int]::TryParse($answer, [ref]$number) -and $number -ge $Min -and $number -le $Max) {
@@ -96,25 +88,43 @@
         }
         $exeCandidates = @($exeCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
         Write-Host "`nFirefox Container Launcher`n"
-        for ($i = 0; $i -lt $exeCandidates.Count; $i++) { Write-Host "$($i + 1). $($exeCandidates[$i])" }
-        if ($exeCandidates.Count -gt 0) {
-            $pick = Ask-Number 'Firefox installation (0 = enter path)' 0 $exeCandidates.Count 1
-        } else { $pick = 0 }
-        if ($pick -eq 0) {
-            $firefoxPath = (Read-Host 'Full path to firefox.exe').Trim().Trim('"')
-        } else { $firefoxPath = $exeCandidates[$pick - 1] }
+        if ($exeCandidates.Count -eq 1) {
+            $firefoxPath = $exeCandidates[0]
+        } elseif ($exeCandidates.Count -gt 1) {
+            for ($i = 0; $i -lt $exeCandidates.Count; $i++) { Write-Host "$($i + 1). $($exeCandidates[$i])" }
+            $pick = Ask-Number 'Which Firefox installation?' 1 $exeCandidates.Count 1
+            $firefoxPath = $exeCandidates[$pick - 1]
+        } else {
+            $firefoxPath = (Read-Host 'Firefox not found. Enter the full path to firefox.exe').Trim().Trim('"')
+        }
         if (-not (Test-Path -LiteralPath $firefoxPath -PathType Leaf) -or
             [IO.Path]::GetFileName($firefoxPath) -ine 'firefox.exe') { throw 'Select a valid firefox.exe file.' }
 
+        # Only consider profiles with the required active extension. A single match is unambiguous.
         $profiles = @(Get-Profiles $roots)
-        Write-Host "`nProfiles (check the correct folder in Firefox at about:support):"
-        for ($i = 0; $i -lt $profiles.Count; $i++) { Write-Host "$($i + 1). $($profiles[$i].Name) -- $($profiles[$i].Path)" }
-        if ($profiles.Count -gt 0) {
-            $pick = Ask-Number 'Profile (0 = enter folder)' 0 $profiles.Count 1
-        } else { $pick = 0 }
-        if ($pick -eq 0) {
-            $profilePath = (Read-Host 'Full Firefox profile folder path').Trim().Trim('"')
-        } else { $profilePath = $profiles[$pick - 1].Path }
+        $eligible = @($profiles | Where-Object {
+            $metadata = Join-Path $_.Path 'extensions.json'
+            try {
+                $data = Get-Content -LiteralPath $metadata -Raw -Encoding UTF8 | ConvertFrom-Json
+                @($data.addons | Where-Object {
+                    $_.id -eq '{f069aec0-43c5-4bbf-b6b4-df95c4326b98}' -and $_.active -eq $true
+                }).Count -eq 1
+            } catch { $false }
+        })
+        if ($eligible.Count -eq 1) {
+            $profilePath = $eligible[0].Path
+            $profileName = $eligible[0].Name
+        } elseif ($eligible.Count -gt 1) {
+            Write-Host 'The extension is installed in more than one profile:'
+            for ($i = 0; $i -lt $eligible.Count; $i++) { Write-Host "$($i + 1). $($eligible[$i].Name) -- $($eligible[$i].Path)" }
+            $pick = Ask-Number 'Which profile?' 1 $eligible.Count 1
+            $profilePath = $eligible[$pick - 1].Path
+            $profileName = $eligible[$pick - 1].Name
+        } else {
+            Write-Host 'No profile with the extension was found automatically.'
+            $profilePath = (Read-Host 'Enter your Firefox Profile Folder (shown in about:support)').Trim().Trim('"')
+            $profileName = 'selected profile'
+        }
         if (-not (Test-Path -LiteralPath $profilePath -PathType Container)) { throw 'Profile folder does not exist.' }
         $profilePath = (Resolve-Path -LiteralPath $profilePath).Path
         $extensionPath = Join-Path $profilePath 'extensions.json'
@@ -124,17 +134,10 @@
         if ($addon.Count -ne 1) { throw 'Install/enable Open external links in a container in this profile: https://addons.mozilla.org/firefox/addon/open-url-in-container/' }
         if ($addon[0].version -ne '1.0.3') { throw "Extension version $($addon[0].version) detected. This launcher targets 1.0.3; verify the protocol before using a different version." }
 
-        if (@(Get-Process firefox -ErrorAction SilentlyContinue).Count -gt 0) {
-            Write-Host "`nFirefox is running. Keep ONLY the selected profile open: $profilePath"
-            Write-Host 'Check about:support > Profile Folder in that window. Close other Firefox profiles normally.'
-            if (-not (Ask-Yes 'Is the selected profile the only Firefox profile running?')) { return }
-        }
-        $logPath = Join-Path $stateDir 'last-run.json'
-        if (Test-Path -LiteralPath $logPath) {
-            Write-Host "`nA previous launch record exists: $logPath"
-            Write-Host 'This script cannot inspect live tabs. Continuing may open additional tabs.'
-            if (-not (Ask-Yes 'Start another run?')) { return }
-        }
+        Write-Host "Using Firefox profile: $profileName"
+        Write-Host 'Keep only this Firefox profile open. Ctrl+C stops the launcher.'
+        Write-Host 'Numbered containers are reused, with their existing cookies and sessions.'
+        Write-Host ''
 
         $defaultUrl = 'https://glastonbury.seetickets.com/'
         while ($true) {
@@ -145,83 +148,41 @@
                 $parsed.Scheme -in @('http', 'https') -and $parsed.Host -and -not $parsed.UserInfo) { break }
             Write-Host 'Enter an absolute http:// or https:// URL without embedded credentials (max 8000 characters).'
         }
-        $mode = Ask-Number '1 = fresh containers, 2 = select existing containers' 1 2 1
-        $targets = @()
-        if ($mode -eq 1) {
-            $count = Ask-Number 'How many fresh containers?' 1 500 5
-            $batch = 'Batch-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,8)
-            for ($i = 1; $i -le $count; $i++) {
-                $targets += [pscustomobject]@{ Name = ('{0}-{1:D3}' -f $batch, $i); Id = '' }
+        $count = Ask-Number 'How many containers?' 1 500 5
+        while ($true) {
+            $answer = (Read-Host 'Delay in seconds, e.g. 2 or 2-10 [Enter = 2-10]').Trim()
+            if (-not $answer) { $answer = '2-10' }
+            $minDelay = 0
+            $maxDelay = 0
+            if ($answer -match '^(\d{1,3})(?:\s*-\s*(\d{1,3}))?$') {
+                $minDelay = [int]$matches[1]
+                $maxDelay = $minDelay
+                if ($matches[2]) { $maxDelay = [int]$matches[2] }
+                if ($minDelay -ge 1 -and $maxDelay -ge $minDelay -and $maxDelay -le 300) { break }
             }
-        } else {
-            $containerPath = Join-Path $profilePath 'containers.json'
-            if (-not (Test-Path -LiteralPath $containerPath)) { throw "No container inventory at $containerPath. Create containers in Firefox first." }
+            Write-Host 'Enter 1-300 seconds, or a range such as 2-10.'
+        }
+        # Read-only check: existing duplicate names cannot be resolved reliably by name.
+        $containerPath = Join-Path $profilePath 'containers.json'
+        if (Test-Path -LiteralPath $containerPath) {
             $inventory = Get-Content -LiteralPath $containerPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $existing = @($inventory.identities | Where-Object { $_.public -eq $true })
-            if ($existing.Count -eq 0) { throw 'No existing public containers found.' }
-            for ($i = 0; $i -lt $existing.Count; $i++) {
-                $label = $existing[$i].name
-                if (-not $label) { $label = $existing[$i].l10nID }
-                Write-Host "$($i + 1). $label (ID $($existing[$i].userContextId))"
-            }
-            while ($true) {
-                $selection = (Read-Host 'Enter numbers separated by commas, or all').Trim()
-                $indices = @()
-                $valid = $true
-                if ($selection -ieq 'all') { $indices = @(1..$existing.Count) }
-                else {
-                    foreach ($token in $selection.Split(',')) {
-                        $n = 0
-                        if (-not [int]::TryParse($token.Trim(), [ref]$n) -or $n -lt 1 -or $n -gt $existing.Count) { $valid = $false; break }
-                        $indices += $n
-                    }
-                }
-                $indices = @($indices | Select-Object -Unique)
-                if ($valid -and $indices.Count -gt 0 -and $indices.Count -le 500) { break }
-                Write-Host 'Choose 1-500 valid entries. Example: 1,3,5'
-            }
-            foreach ($n in $indices) {
-                $c = $existing[$n - 1]
-                $id = 0
-                if (-not [int]::TryParse([string]$c.userContextId, [ref]$id) -or $id -lt 1) { throw 'Invalid container ID in inventory.' }
-                $label = $c.name
-                if (-not $label) { $label = "Container $id" }
-                $targets += [pscustomobject]@{ Name = $label; Id = "firefox-container-$id" }
+            for ($n = 1; $n -le $count; $n++) {
+                $duplicates = @($inventory.identities | Where-Object { $_.public -eq $true -and $_.name -ceq [string]$n })
+                if ($duplicates.Count -gt 1) { throw "More than one container is named $n. Rename the duplicate containers in Firefox, then try again." }
             }
         }
-        $minDelay = Ask-Number 'Minimum delay between launches, seconds' 1 300 2
-        $maxDelay = Ask-Number 'Maximum delay between launches, seconds' $minDelay 300 ([math]::Max(10, $minDelay))
-        $batchSize = Ask-Number 'Pause for confirmation after every N launches' 1 500 10
-        Write-Host "`nProfile: $profilePath`nURL: $url`nTabs requested: $($targets.Count)`nDelay: $minDelay-$maxDelay seconds"
-        if (-not (Ask-Yes 'Open the first tab?')) { return }
-
-        $record = [ordered]@{ Started = (Get-Date).ToString('o'); Profile = $profilePath; Url = $url; Targets = $targets; Attempts = @() }
         $colors = @('blue', 'turquoise', 'green', 'yellow', 'orange', 'red', 'pink', 'purple')
-        $sent = 0
-        for ($i = 0; $i -lt $targets.Count; $i++) {
-            if ($i -eq 1) {
-                Write-Host 'Check Firefox: the first page should be in the intended container. Handle any protocol prompt.'
-                if (-not (Ask-Yes 'Did the first container tab open correctly? Continue?')) { break }
-            } elseif ($i -gt 0 -and ($i % $batchSize) -eq 0) {
-                if (-not (Ask-Yes "$sent launch requests sent. Continue with the next batch?")) { break }
-            }
-            if ($i -gt 0) {
+        Write-Host "`nOpening containers 1 to $count. Press Ctrl+C to stop.`n"
+        for ($i = 1; $i -le $count; $i++) {
+            if ($i -gt 1) {
                 $delay = Get-Random -Minimum $minDelay -Maximum ($maxDelay + 1)
-                Write-Host "Waiting $delay seconds... (Ctrl+C to stop)"
                 Start-Sleep -Seconds $delay
             }
-            $target = $targets[$i]
-            $uri = New-ContainerUri $target.Name $target.Id $url $colors[$i % $colors.Count]
-            # Record before dispatch: after interruption, an attempt may or may not have opened.
-            $record.Attempts += [pscustomobject]@{ Name = $target.Name; Time = (Get-Date).ToString('o'); Status = 'Dispatch pending or uncertain' }
-            $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $logPath -Encoding UTF8
+            $uri = New-ContainerUri ([string]$i) '' $url $colors[($i - 1) % $colors.Count]
             Send-Tab $firefoxPath $profilePath $uri
-            $sent++
-            $record.Attempts[-1].Status = 'Launch request sent; tab not verified'
-            $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $logPath -Encoding UTF8
-            Write-Host "[$sent/$($targets.Count)] Requested: $($target.Name)"
+            Write-Host "[$i/$count] Container $i"
         }
-        Write-Host "`n$sent launch requests sent. Check Firefox for actual results. Record: $logPath"
+        Write-Host "`nDone - $count tab requests sent. Check Firefox for the results."
     } catch {
         Write-Host "`nStopped: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host 'Any tabs already opened remain open. Inspect them before running again.'
