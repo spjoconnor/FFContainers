@@ -1,4 +1,4 @@
-# Firefox container launcher. Windows PowerShell 5.1 or PowerShell 7 on Windows.
+# 1 Firefox container launcher. Windows PowerShell 5.1 or PowerShell 7 on Windows.
 # Uses Open external links in a container 1.0.3. No Firefox profile files are modified.
 # Wrapped in a child scope so irm ... | iex does not leave settings/functions behind.
 & {
@@ -14,6 +14,45 @@
                 return $number
             }
             Write-Host "Enter a whole number from $Min to $Max."
+        }
+    }
+    function Ask-CloseFirefox {
+        while ($true) {
+            $answer = (Read-Host 'Close ALL Firefox windows and tabs before opening? [Y/n, Enter = Yes]').Trim()
+            if ($answer -match '^(y|yes)?$') { return $true }
+            if ($answer -match '^(n|no)$') { return $false }
+            Write-Host 'Enter y or n.'
+        }
+    }
+    function Close-FirefoxNormally {
+        Write-Host 'Closing Firefox normally. Respond to any Firefox save/close prompts.'
+        $requested = @{}
+        # Re-enumerate so another window belonging to the same process can be closed next.
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            $processes = @(Get-Process firefox -ErrorAction SilentlyContinue)
+            if ($processes.Count -eq 0) { return }
+            foreach ($process in $processes) {
+                try {
+                    $handle = $process.MainWindowHandle.ToInt64()
+                    if ($handle -ne 0 -and -not $requested.ContainsKey($handle)) {
+                        if ($process.CloseMainWindow()) { $requested[$handle] = $true }
+                    }
+                } catch {
+                    # A process may exit while being inspected. The next poll checks again.
+                }
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (@(Get-Process firefox -ErrorAction SilentlyContinue).Count -gt 0) {
+            throw 'Firefox is still running. Close it manually and run again. No processes were force-killed.'
+        }
+    }
+    function Ask-Fresh {
+        while ($true) {
+            $answer = (Read-Host 'Delete ALL numbered containers and start fresh? [y/N, Enter = No]').Trim()
+            if ($answer -match '^(y|yes)$') { return $true }
+            if ($answer -match '^(n|no)?$') { return $false }
+            Write-Host 'Enter y or n.'
         }
     }
     function Read-Ini([string]$Path) {
@@ -136,7 +175,7 @@
 
         Write-Host "Using Firefox profile: $profileName"
         Write-Host 'Keep only this Firefox profile open. Ctrl+C stops the launcher.'
-        Write-Host 'Numbered containers are reused, with their existing cookies and sessions.'
+        Write-Host 'Reuse numbered containers, or choose Start fresh to reset them.'
         Write-Host ''
 
         $defaultUrl = 'https://glastonbury.seetickets.com/'
@@ -162,9 +201,28 @@
             }
             Write-Host 'Enter 1-300 seconds, or a range such as 2-10.'
         }
+        $fresh = Ask-Fresh
+        if (@(Get-Process firefox -ErrorAction SilentlyContinue).Count -gt 0) {
+            Write-Host 'This includes ordinary tabs and other Firefox profiles. The script does not clear cookies or delete containers.'
+            Write-Host 'Firefox may restore old tabs on startup if session restore is enabled.'
+            if (Ask-CloseFirefox) { Close-FirefoxNormally }
+        }
+        if ($fresh) {
+            Write-Host "`nReset needs the included Numbered Container Reset helper in THIS Firefox profile."
+            Write-Host '1. Extract Firefox_Container_Reset_Helper.zip to a folder.'
+            Write-Host '2. In the Firefox page opening now, click Load Temporary Add-on and select manifest.json.'
+            Write-Host '   If already loaded, click its toolbar button: Reset numbered containers.'
+            Write-Host '3. Review the list, tick the confirmation, and click Delete numbered containers.'
+            Write-Host '   This removes ALL numeric names, including numbers above the requested count.'
+            Write-Host '4. Wait for Success (or No numbered containers), then return here.'
+            Write-Host 'Temporary helpers must be loaded again after Firefox restarts.'
+            Send-Tab $firefoxPath $profilePath 'about:debugging#/runtime/this-firefox'
+            $completion = (Read-Host 'Type RESET only after the helper completes; anything else cancels').Trim()
+            if ($completion -cne 'RESET') { Write-Host 'Cancelled. No new tabs requested.'; return }
+        }
         # Read-only check: existing duplicate names cannot be resolved reliably by name.
         $containerPath = Join-Path $profilePath 'containers.json'
-        if (Test-Path -LiteralPath $containerPath) {
+        if (-not $fresh -and (Test-Path -LiteralPath $containerPath)) {
             $inventory = Get-Content -LiteralPath $containerPath -Raw -Encoding UTF8 | ConvertFrom-Json
             for ($n = 1; $n -le $count; $n++) {
                 $duplicates = @($inventory.identities | Where-Object { $_.public -eq $true -and $_.name -ceq [string]$n })
